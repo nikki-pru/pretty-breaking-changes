@@ -2,4 +2,8 @@
 /.idea/
 __pycache__/
 /report.md
+/report-dxp.md
+/report-cms.md
+/report-cms-core.md
+/report-core.md
 /pretty-breaking-changes.iml

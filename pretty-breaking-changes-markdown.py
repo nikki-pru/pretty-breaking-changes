@@ -8,6 +8,8 @@ import re
 
 breaking_change_report_keyword = "# breaking"
 
+cms_standalone_marker_file_name = ".lfrbuild-cms-standalone"
+
 revert_footer_pattern = re.compile(r'This reverts commit ([0-9a-f]{7,40})')
 
 markdown = mistune.create_markdown(renderer='ast')
@@ -151,6 +153,56 @@ def get_first_level_path(file_path):
     return first_level_path
 
 
+def get_cms_standalone_module_paths(repo, *refs):
+    module_paths = set()
+
+    for ref in refs:
+        for file_path in repo.git.ls_tree("-r", "--name-only", ref).split('\n'):
+            if os.path.basename(file_path) == cms_standalone_marker_file_name:
+                module_paths.add(os.path.dirname(file_path))
+
+    return module_paths
+
+
+def get_module_path(file_path, module_paths):
+    directory_path = file_path.strip().strip('/')
+
+    while directory_path:
+        if directory_path in module_paths:
+            return directory_path
+
+        directory_path = os.path.dirname(directory_path)
+
+    return None
+
+
+def is_in_scope(file_path, module_paths, path_prefixes):
+    if get_module_path(file_path, module_paths):
+        return True
+
+    file_path = file_path.strip().strip('/')
+
+    return any(file_path == prefix or file_path.startswith(prefix + '/') for prefix in path_prefixes)
+
+
+def pop_only_values(args):
+    args = [value for arg in args for value in (["--only", "cms"] if arg == "--cms" else [arg])]
+
+    only_values = []
+
+    while "--only" in args:
+        start_index = args.index("--only")
+        end_index = start_index + 1
+
+        while end_index < len(args) and not args[end_index].startswith("--"):
+            end_index += 1
+
+        only_values += args[start_index + 1:end_index]
+        args = args[:start_index] + args[end_index:]
+
+    return args, only_values
+
+
 def get_reverted_commit_hashes(repo, start_hash, end_hash):
     raw_reverts = repo.git.log(start_hash + ".." + end_hash, "--grep", "This reverts commit",
                                "--pretty=format:%H%x1f%B%x1e")
@@ -195,7 +247,7 @@ def is_reverted(git_hash, reverters_by_hash, visited_hashes):
     return False
 
 
-def main(repo_path, repo_branch, start_hash, end_hash):
+def main(repo_path, repo_branch, start_hash, end_hash, only_values=()):
     amendments_file_path = repo_path + "/readme/BREAKING_CHANGES_AMENDMENTS.md"
 
     liferay_portal_ee_repo = git.Repo(repo_path)
@@ -276,6 +328,32 @@ def main(repo_path, repo_branch, start_hash, end_hash):
 
     print("        " + str(amendments_applied) + " amendment(s) applied.")
 
+    if only_values:
+        cms_module_paths = set()
+
+        if "cms" in only_values:
+            cms_module_paths = get_cms_standalone_module_paths(liferay_portal_ee_repo, start_hash, end_hash)
+
+        path_prefixes = [value.strip('/') for value in only_values if value != "cms"]
+
+        total_changes = sum(len(changes) for changes in breaking_changes_info.values())
+
+        for git_hash in list(breaking_changes_info):
+            breaking_changes_info[git_hash] = [
+                change for change in breaking_changes_info[git_hash]
+                if is_in_scope(change['affected_file_path'], cms_module_paths, path_prefixes)]
+
+            if not breaking_changes_info[git_hash]:
+                del breaking_changes_info[git_hash]
+
+        kept_changes = sum(len(changes) for changes in breaking_changes_info.values())
+
+        print("        --only " + " ".join(only_values) + ": kept " + str(kept_changes) + " of "
+              + str(total_changes) + " breaking change(s).")
+
+        if "cms" in only_values:
+            print("        " + str(len(cms_module_paths)) + " module(s) with " + cms_standalone_marker_file_name)
+
     affected_file_paths_and_hashes = {}
 
     for git_hash in breaking_changes_info:
@@ -329,16 +407,27 @@ def main(repo_path, repo_branch, start_hash, end_hash):
 
             entire_output += this_block
 
-    entire_output_fh = open('report.md', 'w')
+    if not only_values:
+        report_file_name = 'report-dxp.md'
+    elif only_values == ["cms"]:
+        report_file_name = 'report-cms.md'
+    elif "cms" in only_values:
+        report_file_name = 'report-cms-core.md'
+    else:
+        report_file_name = 'report-core.md'
+
+    entire_output_fh = open(report_file_name, 'w')
 
     entire_output_fh.write(entire_output)
 
     entire_output_fh.close()
 
-    print("Done. Wrote report.md (" + str(len(entire_output)) + " chars).")
+    print("Done. Wrote " + report_file_name + " (" + str(len(entire_output)) + " chars).")
 
 
 if __name__ == '__main__':
+    sys.argv, only = pop_only_values(sys.argv)
+
     try:
         path = sys.argv[1]
     except IndexError:
@@ -362,4 +451,4 @@ if __name__ == '__main__':
     except IndexError:
         final_hash = "HEAD"
 
-    main(path, branch, first_hash, final_hash)
+    main(path, branch, first_hash, final_hash, only)
